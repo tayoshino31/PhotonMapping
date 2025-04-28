@@ -3,4 +3,4 @@
 	url = https://github.com/tayoshino31/photon_mapping.git
 [submodule "lajolla"]
 	path = lajolla
-	url = https://github.com/BachiLi/lajolla_public.git
+	url = https://github.com/tayoshino31/lajolla_public.git
