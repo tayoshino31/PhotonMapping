@@ -1,0 +1,3 @@
+[submodule "third_party/lajolla"]
+	path = third_party/lajolla
+	url = https://github.com/tayoshino31/photon_mapping.git
