@@ -1,3 +1,4 @@
+#pragma once
 #include "parsers/parse_scene.h"
 #include "parallel.h"
 #include "image.h"
@@ -20,10 +21,13 @@ Image3 pm_render(const Scene &scene) {
     Image3 img(w, h);
 
     //initialize
-    PhotonMapping pm(100000, scene);
+    PhotonMapping pm(10000, scene);
+    
     //photon tracing
     pcg32_state rng = init_pcg32();
     pm.photon_tracing(rng);
+    //create kdtree
+    pm.build_kdtree();
 
     //Camera-Ray Tracing
     constexpr int tile_size = 16;
@@ -41,7 +45,7 @@ Image3 pm_render(const Scene &scene) {
                 Spectrum radiance = make_zero_spectrum();
                 int spp = scene.options.samples_per_pixel;
                 for (int s = 0; s < spp; s++) {
-                    radiance += pm.camera_traing(x, y, rng);
+                    radiance += pm.camera_tracing(x, y, rng);
                 }
                 img(x, y) = radiance / Real(spp);
             }

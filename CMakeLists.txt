@@ -9,7 +9,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # --- Add lajolla ---
 add_subdirectory(lajolla)
 
-add_executable(PhotonMapping main.cpp photon.cpp utils.h)
+add_executable(PhotonMapping main.cpp photon.cpp utils.h nanoflann.hpp kdtree.cpp)
 target_link_libraries(PhotonMapping PRIVATE lajolla_lib)
 
 target_include_directories(PhotonMapping PRIVATE
