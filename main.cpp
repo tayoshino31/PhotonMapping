@@ -17,11 +17,14 @@ extern template float  next_pcg32_real<float >(pcg32_state&);
 extern template double next_pcg32_real<double>(pcg32_state&);
 
 Image3 pm_render(const Scene &scene) {
-    int w = scene.camera.width, h = scene.camera.height;
-    Image3 img(w, h);
-
     //initialize
-    PhotonMapping pm(10000, scene);
+    const int n_photons = 1000000;
+    const int n_neighbors = 500;
+    const int max_depth = 10;
+    const int w = scene.camera.width, 
+    const h = scene.camera.height;
+    Image3 img(w, h);
+    PhotonMapping pm(n_photons, scene, n_neighbors, max_depth);
     
     //photon tracing
     pcg32_state rng = init_pcg32();

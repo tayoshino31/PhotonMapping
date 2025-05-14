@@ -30,12 +30,14 @@ struct Photon {
 class PhotonMapping {
     private:
         int num_photons;
+        int n_neighbors;
+        int max_depth;
         const Scene& scene;
         std::vector<Photon> photon_map;
         std::vector<Vector3> photon_pos;
         PhotonKDTree kdtree;
     public:
-        PhotonMapping(int num_photons, const Scene& scene);
+        PhotonMapping(const int num_photons, const Scene& scene, const int n_neighbors, const int max_depth);
         ~PhotonMapping();
         std::optional<Ray> bounce_photon(PathVertex isect, Ray photon_ray, 
             Spectrum& beta, pcg32_state& rng);
