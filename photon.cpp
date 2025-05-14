@@ -1,17 +1,15 @@
 #pragma once  
 #include "photon.h"
 
-PhotonMapping::PhotonMapping(int num_photons, const Scene& scene) 
-: num_photons(num_photons), scene(scene){
+PhotonMapping::PhotonMapping(const int num_photons, const Scene& scene, const int n_neighbors, const int max_depth) 
+: num_photons(num_photons), scene(scene), n_neighbors(n_neighbors), max_depth(max_depth){
 }
 PhotonMapping::~PhotonMapping(){
 }
-
-///------------------------------ Photon Tracing ------------------------------------///
 void PhotonMapping::build_kdtree() {kdtree.build(photon_pos); }
-void PhotonMapping::store_photon(const Vector3 position, 
-                                 const Vector3 direction, 
-                                 const Spectrum energy) {
+void PhotonMapping::store_photon(Vector3 position, 
+                                 Vector3 direction, 
+                                 Spectrum energy) {
     Photon p{position, direction, energy};
     photon_map.push_back(p);
     photon_pos.push_back(position);
@@ -21,6 +19,10 @@ Real get_area(const Light& light, const Scene& scene){
     const TriangleMesh* mesh = std::get_if<TriangleMesh>(&scene.shapes[areaLight->shape_id]);
     return mesh->total_area;
 }
+
+
+
+///------------------------------ Photon Tracing ------------------------------------///
 void PhotonMapping::photon_tracing(pcg32_state& rng){
     for (int i = 0; i < num_photons; i++) {
         // sample position
@@ -35,27 +37,39 @@ void PhotonMapping::photon_tracing(pcg32_state& rng){
 
         // sample direction
         Vector2 uv(next_pcg32_real<Real>(rng), next_pcg32_real<Real>(rng));
-        Vector3 local_dir = sample_cos_hemisphere(uv);
-        std::pair<Vector3, Vector3> TB = coordinate_system(point_on_light.normal); //TODO why this conversion?
-        Vector3 dir = local_dir.x * TB.first + local_dir.y * TB.second + local_dir.z * point_on_light.normal;
-
+        Frame frame(point_on_light.normal);
+        Vector3 dir = to_world(frame, sample_cos_hemisphere(uv));
+            
         // create a photon ray
         Ray photon_ray{pos, dir, get_shadow_epsilon(scene), infinity<Real>()};
 
         // compute del flux of photon
         Real area = get_area(light, scene);
         Spectrum Le = emission(light, dir, 0, point_on_light, scene);
-        Spectrum beta = area * Le * c_PI / Real(num_photons);
+        Spectrum beta = area * Le * c_PI; //TODO
 
         // photon mapping
-        for (int bounce = 0; bounce < 5; bounce++) {
+        Spectrum throughput = make_const_spectrum(1.0);
+        for (int bounce = 0; bounce < max_depth; bounce++) {
             std::optional<PathVertex> vertex_ = intersect(scene, photon_ray);
             if (!vertex_) {break;}
             PathVertex vertex = *vertex_;
-            store_photon(vertex.position, photon_ray.dir, beta); //TODO //if (bounce > 0) //TODO RR
-            std::optional<Ray> reflected_ray = bounce_photon(vertex, photon_ray, beta, rng);
-            if (!reflected_ray)break;
+            if(is_light(scene.shapes[vertex.shape_id])) break; //TODO break if the vertex is light source
+
+            if(bounce >= 1) //TODO for only indirect illumination
+                store_photon(vertex.position, -photon_ray.dir, beta * throughput); 
+            std::optional<Ray> reflected_ray = bounce_photon(vertex, photon_ray, throughput, rng);
+
+            if (!reflected_ray) break;
             else photon_ray = *reflected_ray;
+            
+            //Russian roulete
+            if(bounce > 1){
+                Real rr_prob = min(max(throughput), 0.95);
+                Real rand = next_pcg32_real<Real>(rng);
+                if (rand >= rr_prob) break; 
+                else throughput /= rr_prob;
+            }
         }
     }
 }
@@ -66,16 +80,25 @@ std::optional<Ray> PhotonMapping::bounce_photon(PathVertex isect, Ray photon_ray
     Vector3 wi = -photon_ray.dir;
     Material mat = scene.materials[isect.material_id];
     std::optional<BSDFSampleRecord> bsdf_sample_ = sample_bsdf(mat, wi, isect, scene.texture_pool, 
-                                                               bsdf_rnd_param_uv, bsdf_rnd_param_w);
+                                                               bsdf_rnd_param_uv, bsdf_rnd_param_w,  TransportDirection::TO_VIEW);
     if (!bsdf_sample_) return std::nullopt; 
     const BSDFSampleRecord& bsdf_sample = *bsdf_sample_;
-    Vector3 wo = bsdf_sample.dir_out;
+    Vector3 wo = bsdf_sample.dir_out; 
 
     // update photon throughput
-    Spectrum f = eval(mat, wi, wo, isect, scene.texture_pool);
-    Real pdf = pdf_sample_bsdf(mat, wi, wo, isect, scene.texture_pool);
-    Real cos_theta = max(0.0, dot(wo, isect.geometric_normal));// TODO
-    beta *= f * cos_theta / pdf; 
+    Spectrum f = eval(mat, wi, wo, isect, scene.texture_pool, TransportDirection::TO_VIEW);
+    Real pdf = pdf_sample_bsdf(mat, wi, wo, isect, scene.texture_pool, TransportDirection::TO_VIEW);
+    //Real cos_theta = abs(dot(wo, isect.shading_frame.n));
+    Real wo_ns = max(0.0, dot(wo, isect.shading_frame.n));
+    Real wi_ng = max(0.0, dot(wi, isect.geometric_normal));
+    Real wi_ns = max(0.0, dot(wi, isect.shading_frame.n));
+    Real wo_ng = max(0.0, dot(wo, isect.geometric_normal));
+    Real cos_theta = abs(wo_ns) * abs(wi_ng) / abs(wo_ng);
+    if (wi_ng * wi_ns <= 0 || wo_ng * wo_ns <= 0) {cos_theta = 0; }
+    if (pdf <= 0.0) return std::nullopt;
+
+
+    beta *= f * cos_theta/ pdf; //TODO no cosin=therta
 
     // update photon ray
     Ray bsdf_ray{isect.position, wo, get_intersection_epsilon(scene), infinity<Real>() };
@@ -101,15 +124,18 @@ Spectrum PhotonMapping::camera_tracing(int x, int y, pcg32_state& rng) {
     //find N-th nearest neighbors at query point.
     float query[3] = {isect.position.x, isect.position.y, isect.position.z};
     float radius2;
-    std::vector<size_t> neighbors = kdtree.findNearestN(query, 500, radius2);
+    std::vector<size_t> neighbors = kdtree.findNearestN(query, n_neighbors, radius2);
+    // float radius = 10.0f;
+    // float radius2 = radius * radius;
+    // std::vector<size_t> neighbors = kdtree.findPhotonsWithinRadius(query, radius);
 
     // direct illumination
-    Spectrum direct = make_zero_spectrum();
-    //Spectrum direct = dirct_illumination(isect, -ray.dir, rng);
+    //Spectrum direct = make_zero_spectrum();
+    Spectrum direct = dirct_illumination(isect, -ray.dir, rng);
 
     // indirect illumination
-    Spectrum indirect = indirct_illumination(isect, -ray.dir, neighbors, radius2);
-
+    //Spectrum indirect = make_zero_spectrum();
+    Spectrum indirect =  indirct_illumination(isect, -ray.dir, neighbors, radius2);
     return direct + indirect;
 }
 Spectrum PhotonMapping::dirct_illumination(PathVertex isect, Vector3 dir_view, pcg32_state& rng) {
@@ -141,17 +167,44 @@ Spectrum PhotonMapping::dirct_illumination(PathVertex isect, Vector3 dir_view, p
     return (Li * f * G) / pdf;
 }
 Spectrum PhotonMapping::indirct_illumination(PathVertex isect, Vector3 wo, std::vector<size_t> neighbors, Real radius2){
-    const Material& mat = scene.materials[isect.material_id];
+    const Material& mat = scene.materials[isect.material_id];    
     Spectrum indirect = make_zero_spectrum();
+    if (is_light(scene.shapes[isect.shape_id])) return emission(isect, wo, scene);
     for (const size_t& index : neighbors) {
         const Photon& photon = photon_map[index];
-        Vector3 wi = -photon.direction;
-        Spectrum f = eval(mat, wi, wo, isect, scene.texture_pool); 
-        indirect += photon.energy * f; //TODO //Real cos_theta = max(0.0, dot(omega_i, isect.geometric_normal)); 
+
+        Spectrum f = eval(mat, photon.direction, wo, isect, scene.texture_pool, TransportDirection::TO_VIEW); 
+
+        //cancel cosin term
+        Frame frame = isect.shading_frame;
+        if (dot(frame.n, photon.direction) < 0) {frame = -frame;}
+        Real offset = fmax(dot(frame.n, wo), Real(0));
+        if(offset > 0.0001) f /= offset;
+
+        indirect += photon.energy * f;
     }
-    indirect /= (c_PI * radius2);
+    if(neighbors.size() > 0){
+         indirect /= (c_PI * radius2 * Real(num_photons)); //divided by n phton at the end
+    }
     return indirect;
 }
+
+
+
+// Vector2 bsdf_rnd_param_uv{next_pcg32_real<Real>(rng), next_pcg32_real<Real>(rng)};
+// Real bsdf_rnd_param_w = next_pcg32_real<Real>(rng);
+// std::optional<BSDFSampleRecord> bsdf_sample_ = sample_bsdf(mat, wo, isect, scene.texture_pool, 
+//                                                            bsdf_rnd_param_uv, bsdf_rnd_param_w);
+// const BSDFSampleRecord& bsdf_sample = *bsdf_sample_;
+// Vector3 dir = bsdf_sample.dir_out; 
+// Spectrum f = eval(mat, wo, dir, isect, scene.texture_pool);
+// Real pdf = pdf_sample_bsdf(mat, wo, dir, isect, scene.texture_pool);
+// Real cos_theta = abs(dot(dir, isect.shading_frame.n));
+// if (pdf <= 0) return make_zero_spectrum();
+
+//return f * cos_theta * indirect / pdf;
+    
+
 
 //std::array<std::vector<Vector3>, 5> vertexPositions;
 //std::array<std::vector<Vector3>, 5> vertexRGB;
@@ -204,3 +257,10 @@ Spectrum PhotonMapping::indirct_illumination(PathVertex isect, Vector3 wo, std::
 //Real wi_ng = max(0.0, dot(dir_bsdf, isect.geometric_normal));
 //Real wo_ng = max(0.0, dot(dir_view, isect.geometric_normal));
 //Real cos_theta = wo_ns * wi_ng / wo_ng;
+
+//std::string path = "C:\\Users\\tayos\\Desktop\\points\\pos.ply";
+//save_point_as_ply(positions, colors, path);
+
+//std::cout << photon_map.size() << std::endl;
+//std::string path = "C:\\Users\\tayos\\Desktop\\light_emission\\bounce_2.ply";
+//save_point_as_ply(positions, power, path);
