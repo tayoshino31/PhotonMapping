@@ -43,4 +43,16 @@ public:
         max_dist2 = *std::max_element(distances.begin(), distances.end());
         return indices;
     }
+    std::vector<size_t> findPhotonsWithinRadius(const float q[3], float radius) const {
+        std::vector<nanoflann::ResultItem<size_t, float>> matches;
+        nanoflann::SearchParameters params;
+        kd_tree->radiusSearch(q, radius, matches, params);
+        std::vector<size_t> indices;
+        indices.reserve(matches.size());
+        for (const auto& match : matches) {
+            indices.push_back(match.first);
+        }
+
+        return indices;
+    }
 };
